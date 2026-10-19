@@ -1,7 +1,7 @@
-name: Linux GTK4 Preview
+name: EvoluFisico Linux GTK4 - CI
 on:
   push:
-    branches: [linux-gtk4]
+    branches: [main]
     paths:
       - 'linux/**'
       - '.github/workflows/linux-gtk4.yml'
