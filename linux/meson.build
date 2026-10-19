@@ -1,0 +1,7 @@
+project('evolufisico-linux', 'c', version: '0.1.0', default_options: ['warning_level=2', 'c_std=c11'])
+gtk = dependency('gtk4', version: '>=4.10')
+sqlite = dependency('sqlcipher')
+executable('evolufisico-linux', ['src/main.c', 'src/storage.c'], dependencies: [gtk, sqlite], install: true)
+smoke = executable('storage-smoke', ['tests/storage-smoke.c', 'src/storage.c'], dependencies: [gtk, sqlite])
+test('sqlite-storage', smoke)
+install_data('data/br.com.evolufisico.desktop', install_dir: get_option('datadir') / 'applications')

@@ -1,0 +1,88 @@
+name: Linux GTK4 Preview
+on:
+  push:
+    branches: [linux-gtk4]
+    paths:
+      - 'linux/**'
+      - '.github/workflows/linux-gtk4.yml'
+  workflow_dispatch:
+jobs:
+  build-deb:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK4 build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential meson ninja-build pkg-config libgtk-4-dev libsqlcipher-dev xvfb imagemagick
+      - name: Check source for unsafe SQL string formatting
+        run: |
+          if grep -nE 'sqlite3_exec\([^,]*, *g_strdup_printf|sqlite3_exec\([^,]*, *sprintf' linux/src/storage.c; then exit 1; fi
+      - name: Guard against deprecated client picker APIs
+        run: |
+          if grep -nE 'gtk_combo_box_|gtk_combo_box_text_' linux/src/main.c; then
+            echo 'Legacy GTK4 client picker API found'
+            exit 1
+          fi
+      - name: Compile and package
+        run: bash linux/package-deb.sh
+      - name: Test native SQLite operations
+        run: meson test -C linux/build --print-errorlogs
+      - name: Compile with strict warnings
+        run: |
+          meson setup linux/build-strict linux --buildtype=debug -Dwerror=true
+          meson compile -C linux/build-strict
+          meson test -C linux/build-strict --print-errorlogs
+      - name: Undefined behavior sanitizer QA
+        env:
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        run: |
+          meson setup linux/build-ubsan linux --buildtype=debug -Db_sanitize=undefined -Dwerror=true
+          meson compile -C linux/build-ubsan
+          meson test -C linux/build-ubsan --print-errorlogs
+      - name: Address sanitizer QA
+        env:
+          ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1"
+        run: |
+          meson setup linux/build-asan linux --buildtype=debug -Db_sanitize=address -Dwerror=true
+          meson compile -C linux/build-asan
+          meson test -C linux/build-asan --print-errorlogs
+      - name: Security source checks
+        run: |
+          ! grep -nE 'system\\(|popen\\(|strcpy\\(|strcat\\(|gets\\(' linux/src/*.c
+          ! grep -nE 'sqlite3_exec\\([^,]+,[[:space:]]*(sprintf|g_strdup_printf)' linux/src/storage.c
+          grep -q 'sqlite3_key' linux/src/storage.c
+          grep -q 'EVOLUFISICO_DB_PASSPHRASE' linux/src/storage.c
+      - name: GTK4 headless visual smoke and screenshot
+        env:
+          EVOLUFISICO_DB_PASSPHRASE: "CI-Only-Fictitious-Visual-2026!"
+        run: |
+          mkdir -p linux/qa-artifacts
+          xvfb-run -a -s "-screen 0 1366x768x24" sh -c '
+            export XDG_DATA_HOME="$(mktemp -d)"
+            linux/build/evolufisico-linux &
+            app_pid=$!
+            sleep 5
+            kill -0 "$app_pid"
+            import -window root linux/qa-artifacts/gtk4-headless.png
+            kill "$app_pid"
+            wait "$app_pid" || true
+          '
+          test -s linux/qa-artifacts/gtk4-headless.png
+      - name: Upload visual QA screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evolufisico-linux-visual-qa
+          path: linux/qa-artifacts/*.png
+          if-no-files-found: ignore
+      - name: Verify Debian package contents
+        run: |
+          dpkg-deb --contents linux/dist/*.deb | tee /tmp/evolufisico-deb-files.txt
+          grep -q 'usr/bin/evolufisico-linux' /tmp/evolufisico-deb-files.txt
+          grep -q 'usr/share/applications/br.com.evolufisico.desktop' /tmp/evolufisico-deb-files.txt
+      - name: Upload Debian preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: evolufisico-linux-gtk4-deb
+          path: linux/dist/*.deb

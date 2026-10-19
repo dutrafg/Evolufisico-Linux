@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=EvoluFisico Linux
+Comment=Aplicativo de gestão de avaliações físicas (prévia GTK4)
+Exec=evolufisico-linux
+Terminal=false
+Categories=Office;Education;
+StartupNotify=true
