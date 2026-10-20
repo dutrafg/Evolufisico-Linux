@@ -3,6 +3,7 @@
 #include "folder_settings.h"
 #include "auto_backup.h"
 #include "drive_sync.h"
+#include "cloud_sync.h"
 #include <errno.h>
 #include <math.h>
 
@@ -14,6 +15,11 @@ typedef struct {
   GtkWidget *folder_settings_status;
   GtkWidget *drive_remote_entry;
   GtkWidget *drive_status;
+  GtkWidget *drive_auto_toggle;
+  guint drive_auto_timer;
+  guint drive_failures;
+  gint64 drive_next_attempt_us;
+  gboolean drive_auto_enabled;
   GtkWidget *client_list;
   GtkWidget *client_entry;
   GtkWidget *status;
@@ -164,6 +170,7 @@ static void show_charges(GtkButton *button,gpointer data) {
   }
   refresh_charges(state,id);
 }
+static void drive_auto_kick(AppState *state);
 /* Never conflate successful SQLCipher commits with optional snapshot failures. */
 static void notify_saved_and_copy(AppState *state, GtkWidget *status, const char *operation) {
   GError *error=NULL;
@@ -189,6 +196,8 @@ static void notify_saved_and_copy(AppState *state, GtkWidget *status, const char
   }
   gtk_label_set_text(GTK_LABEL(status),message);
   g_free(message);g_free(saved_path);g_clear_error(&error);
+  if(result==EF_AUTO_BACKUP_CREATED && state->drive_auto_enabled)
+    drive_auto_kick(state);
 }
 typedef struct { AppState *state; gint64 record_id; gint64 client_id; gboolean assessment; } RecordDeleteRequest;
 static void delete_record_confirmed(GObject *source,GAsyncResult *result,gpointer data) {
@@ -524,12 +533,17 @@ typedef struct {
   char *remote;
   char *folder;
   GtkWidget *status;
+  GtkWidget *window;
   gboolean upload;
+  gboolean automatic;
+  guint left;
 } DriveTask;
 static void drive_task_free(gpointer data) {
   DriveTask *op=data;
   g_free(op->remote);g_free(op->folder);
-  g_object_unref(op->status);g_free(op);
+  g_object_unref(op->status);
+  g_object_unref(op->window);
+  g_free(op);
 }
 static void drive_worker(GTask *task,gpointer source,gpointer task_data,GCancellable *cancel) {
   (void)source;(void)cancel;
@@ -537,7 +551,7 @@ static void drive_worker(GTask *task,gpointer source,gpointer task_data,GCancell
   GError *error=NULL;
   guint count=0;
   gboolean ok=op->upload
-    ? ef_drive_upload_encrypted(op->remote,op->folder,&count,&error)
+    ? ef_cloud_upload_pending(op->remote,op->folder,&count,&op->left,&error)
     : ef_drive_probe(op->remote,&error);
   if(ok)g_task_return_int(task,(gint)count);
   else if(error)g_task_return_error(task,error);
@@ -550,11 +564,21 @@ static void drive_finished(GObject *source,GAsyncResult *result,gpointer user_da
   GError *error=NULL;
   gint count=g_task_propagate_int(task,&error);
   char *message=NULL;
+  AppState *state=g_object_get_data(G_OBJECT(op->window),"app-state");
   if(error) {
-    message=g_strdup_printf("Google Drive: operação não concluída. %s",error->message);
+    message=g_strdup_printf("Google Drive: envio interrompido. %s. As cópias locais permanecem para recuperação.",error->message);
+    if(state && op->automatic) {
+      state->drive_failures=MIN(state->drive_failures+1,5u);
+      guint delay=60u*(1u<<MIN(state->drive_failures-1,4u));
+      state->drive_next_attempt_us=g_get_monotonic_time()+(gint64)delay*G_USEC_PER_SEC;
+    }
     g_clear_error(&error);
   }else if(op->upload) {
-    message=g_strdup_printf("Envio concluído pelo rclone: %d cópia(s) criptografada(s) processada(s); nenhuma exclusão local.",count);
+    message=g_strdup_printf("Google Drive: %d backup(s) criptografado(s) enviado(s); %u aguardando. Não foram excluídos arquivos locais.",count,op->left);
+    if(state) {
+      state->drive_failures=0;
+      state->drive_next_attempt_us=0;
+    }
   }else{
     message=g_strdup("Conta Google Drive acessível pelo rclone. Tokens continuam fora do EvoluFisico.");
   }
@@ -589,7 +613,7 @@ static void drive_save_clicked(GtkButton *button,gpointer data) {
   }
   g_clear_error(&error);
 }
-static void drive_start_operation(AppState *state,gboolean upload) {
+static void drive_start_operation(AppState *state,gboolean upload,gboolean automatic) {
   if(g_object_get_data(G_OBJECT(state->drive_status),"drive-operation-running"))return;
   const char *remote=gtk_editable_get_text(GTK_EDITABLE(state->drive_remote_entry));
   if(!ef_drive_valid_remote(remote)) {
@@ -603,7 +627,7 @@ static void drive_start_operation(AppState *state,gboolean upload) {
     return;
   }
   GError *error=NULL;
-  if(!ef_drive_save_remote(remote,&error)) {
+  if(!automatic && !ef_drive_save_remote(remote,&error)) {
     gtk_label_set_text(GTK_LABEL(state->drive_status),error ? error->message : "Erro ao salvar conta.");
     g_clear_error(&error);return;
   }
@@ -611,7 +635,9 @@ static void drive_start_operation(AppState *state,gboolean upload) {
   op->remote=g_strdup(remote);
   op->folder=g_strdup(folder);
   op->status=g_object_ref(state->drive_status);
+  op->window=g_object_ref(gtk_widget_get_ancestor(state->drive_status,GTK_TYPE_WINDOW));
   op->upload=upload;
+  op->automatic=automatic;
   GTask *task=g_task_new(NULL,NULL,drive_finished,NULL);
   g_task_set_task_data(task,op,drive_task_free);
   g_object_set_data(G_OBJECT(state->drive_status),"drive-operation-running",GINT_TO_POINTER(1));
@@ -621,10 +647,60 @@ static void drive_start_operation(AppState *state,gboolean upload) {
   g_object_unref(task);
 }
 static void drive_test_clicked(GtkButton *button,gpointer data) {
-  (void)button;drive_start_operation(data,FALSE);
+  (void)button;drive_start_operation(data,FALSE,FALSE);
 }
 static void drive_upload_clicked(GtkButton *button,gpointer data) {
-  (void)button;drive_start_operation(data,TRUE);
+  (void)button;drive_start_operation(data,TRUE,FALSE);
+}
+
+/* Opt-in automatic sync. Every attempt is scheduled on GTK main loop; only
+ * validation/transfer runs on a worker. Failures back off 1,2,4,8,16 minutes.
+ */
+static void drive_auto_kick(AppState *state) {
+  if(!state->drive_auto_enabled || !state->drive_status || !state->folder_settings.folder ||
+     !state->store.db || g_object_get_data(G_OBJECT(state->drive_status),"drive-operation-running"))
+    return;
+  if(g_get_monotonic_time()<state->drive_next_attempt_us)return;
+  const char *remote=gtk_editable_get_text(GTK_EDITABLE(state->drive_remote_entry));
+  if(!ef_drive_valid_remote(remote))return;
+  drive_start_operation(state,TRUE,TRUE);
+}
+static gboolean drive_auto_timer_tick(gpointer data) {
+  drive_auto_kick(data);
+  return G_SOURCE_CONTINUE;
+}
+static void drive_auto_toggled(GtkCheckButton *toggle,gpointer data) {
+  AppState *state=data;
+  gboolean enabled=gtk_check_button_get_active(toggle);
+  GError *error=NULL;
+  if(enabled) {
+    const char *remote=gtk_editable_get_text(GTK_EDITABLE(state->drive_remote_entry));
+    if(!ef_drive_valid_remote(remote) || !state->folder_settings.folder) {
+      gtk_label_set_text(GTK_LABEL(state->drive_status),
+        "Configure a conta rclone e a pasta de cópias antes de ativar.");
+      gtk_check_button_set_active(toggle,FALSE);
+      return;
+    }
+    if(!ef_drive_save_remote(remote,&error)) {
+      gtk_label_set_text(GTK_LABEL(state->drive_status),error->message);
+      g_clear_error(&error);
+      gtk_check_button_set_active(toggle,FALSE);return;
+    }
+  }
+  if(!ef_cloud_auto_save(enabled,&error)) {
+    gtk_label_set_text(GTK_LABEL(state->drive_status),
+      error ? error->message : "Falha ao alterar sincronização automática.");
+    g_clear_error(&error);
+    gtk_check_button_set_active(toggle,state->drive_auto_enabled);
+    return;
+  }
+  state->drive_auto_enabled=enabled;
+  state->drive_failures=0;
+  state->drive_next_attempt_us=0;
+  gtk_label_set_text(GTK_LABEL(state->drive_status),
+    enabled ? "Sincronização automática ativada. Verificação a cada 60 segundos enquanto o aplicativo estiver aberto."
+            : "Sincronização automática desativada. Cópias locais preservadas.");
+  if(enabled)drive_auto_kick(state);
 }
 
 static void backup_clicked(GtkButton *button,gpointer data) {
@@ -698,6 +774,7 @@ static void navigate(GtkButton *button, gpointer data) {
 static void destroy_state(gpointer data) {
   AppState *state=data;
   if(state->pending_retry_source)g_source_remove(state->pending_retry_source);
+  if(state->drive_auto_timer)g_source_remove(state->drive_auto_timer);
   ef_store_close(&state->store);
   ef_folder_settings_clear(&state->folder_settings);
   g_free(state);
@@ -945,7 +1022,7 @@ static void activate(GtkApplication *app,gpointer data) {
       gtk_widget_set_halign(drive_title,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),drive_title);
       GtkWidget *drive_hint=gtk_label_new(
-        "Instale rclone e configure sua conta Google no navegador. O EvoluFisico não armazena tokens OAuth. Envio manual de backups SQLCipher; não é sincronização bidirecional.");
+        "Autorize o Google Drive no rclone. Envio criptografado manual ou automático após ativação explícita. Não é sincronização bidirecional.");
       gtk_widget_set_halign(drive_hint,GTK_ALIGN_START);
       gtk_label_set_wrap(GTK_LABEL(drive_hint),TRUE);
       gtk_box_append(GTK_BOX(page),drive_hint);
@@ -978,6 +1055,19 @@ static void activate(GtkApplication *app,gpointer data) {
       g_signal_connect(drive_save,"clicked",G_CALLBACK(drive_save_clicked),state);
       g_signal_connect(drive_test,"clicked",G_CALLBACK(drive_test_clicked),state);
       g_signal_connect(drive_upload,"clicked",G_CALLBACK(drive_upload_clicked),state);
+      state->drive_auto_toggle=gtk_check_button_new_with_label(
+        "Sincronizar backups criptografados automaticamente (a cada 60 s)");
+      gboolean auto_enabled=FALSE;
+      GError *auto_error=NULL;
+      if(!ef_cloud_auto_load(&auto_enabled,&auto_error)) {
+        g_warning("Falha ao carregar sincronização automática: %s",
+                  auto_error ? auto_error->message : "erro");
+        g_clear_error(&auto_error);
+      }
+      state->drive_auto_enabled=auto_enabled;
+      gtk_check_button_set_active(GTK_CHECK_BUTTON(state->drive_auto_toggle),auto_enabled);
+      gtk_box_append(GTK_BOX(page),state->drive_auto_toggle);
+      g_signal_connect(state->drive_auto_toggle,"toggled",G_CALLBACK(drive_auto_toggled),state);
       GtkWidget *folder_title=gtk_label_new("Pasta para cópias criptografadas");
       gtk_widget_add_css_class(folder_title,"heading");
       gtk_widget_set_halign(folder_title,GTK_ALIGN_START);
@@ -1043,6 +1133,8 @@ static void activate(GtkApplication *app,gpointer data) {
   refresh_folder_settings(state);
   retry_pending_tick(state);
   state->pending_retry_source=g_timeout_add_seconds(20,retry_pending_tick,state);
+  state->drive_auto_timer=g_timeout_add_seconds(60,drive_auto_timer_tick,state);
+  drive_auto_kick(state);
   gtk_box_append(GTK_BOX(root),sidebar);
   gtk_box_append(GTK_BOX(root),gtk_separator_new(GTK_ORIENTATION_VERTICAL));
   gtk_widget_set_hexpand(stack,TRUE);
