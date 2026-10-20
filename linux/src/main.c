@@ -1,10 +1,14 @@
 #include <gtk/gtk.h>
 #include "storage.h"
+#include "folder_settings.h"
 #include <errno.h>
 #include <math.h>
 
 typedef struct {
   EfStore store;
+  EfFolderSettings folder_settings;
+  GtkWidget *folder_settings_label;
+  GtkWidget *folder_settings_status;
   GtkWidget *client_list;
   GtkWidget *client_entry;
   GtkWidget *status;
@@ -375,6 +379,87 @@ static void add_client(GtkButton *button, gpointer data) {
   }
   g_free(clean);
 }
+/* The chosen folder is shared by Settings and the encrypted assessment copy.
+ * GTK folder choice is saved only after validation; offline mounts remain configured.
+ */
+static void refresh_folder_settings(AppState *state) {
+  const char *folder=state->folder_settings.folder;
+  if(state->assessment_folder)
+    gtk_editable_set_text(GTK_EDITABLE(state->assessment_folder),folder ? folder : "");
+  if(state->folder_settings_label)
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_label),folder ? folder : "Nenhuma pasta selecionada.");
+  if(state->folder_settings_status) {
+    if(!folder) {
+      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
+        "Pasta não configurada. Escolha onde guardar cópias criptografadas.");
+    }else{
+      GError *error=NULL;
+      gboolean valid=ef_folder_settings_validate(folder,&error);
+      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
+        valid ? "Pasta configurada e acessível. Nenhuma sincronização em segundo plano foi ativada."
+              : "Pasta configurada, mas indisponível ou sem permissão. Verifique a montagem antes de salvar.");
+      g_clear_error(&error);
+    }
+  }
+}
+static void folder_selected(GObject *source,GAsyncResult *result,gpointer data) {
+  GtkWidget *window=GTK_WIDGET(data);
+  AppState *state=g_object_get_data(G_OBJECT(window),"app-state");
+  GError *error=NULL;
+  GFile *folder=gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(source),result,&error);
+  if(folder) {
+    char *path=g_file_get_path(folder);
+    if(path && ef_folder_settings_save(&state->folder_settings,path,&error)) {
+      refresh_folder_settings(state);
+      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
+        "Pasta salva. A escolha será recuperada ao reiniciar o aplicativo.");
+    } else {
+      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
+        error ? error->message : "Escolha uma pasta local montada e acessível.");
+    }
+    g_free(path);g_object_unref(folder);
+  } else if(error && !g_error_matches(error,G_IO_ERROR,G_IO_ERROR_CANCELLED)) {
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_status),error->message);
+  }
+  g_clear_error(&error);
+  g_object_unref(window);
+}
+static void choose_folder_clicked(GtkButton *button,gpointer data) {
+  AppState *state=data;
+  GtkWidget *window=gtk_widget_get_ancestor(GTK_WIDGET(button),GTK_TYPE_WINDOW);
+  GtkFileDialog *dialog=gtk_file_dialog_new();
+  gtk_file_dialog_set_title(dialog,"Selecionar pasta de cópias criptografadas");
+  if(state->folder_settings.folder) {
+    GError *error=NULL;
+    if(ef_folder_settings_validate(state->folder_settings.folder,&error)) {
+      GFile *initial=g_file_new_for_path(state->folder_settings.folder);
+      gtk_file_dialog_set_initial_folder(dialog,initial);
+      g_object_unref(initial);
+    }
+    g_clear_error(&error);
+  }
+  g_object_ref(window);
+  gtk_file_dialog_select_folder(dialog,GTK_WINDOW(window),NULL,folder_selected,window);
+  g_object_unref(dialog);
+}
+static void clear_folder_clicked(GtkButton *button,gpointer data) {
+  (void)button;
+  AppState *state=data;
+  GError *error=NULL;
+  if(ef_folder_settings_save(&state->folder_settings,NULL,&error)) {
+    refresh_folder_settings(state);
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_status),"Pasta desassociada. Cópias existentes não foram excluídas.");
+  } else {
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
+      error ? error->message : "Falha ao remover configuração.");
+  }
+  g_clear_error(&error);
+}
+static void validate_folder_clicked(GtkButton *button,gpointer data) {
+  (void)button;
+  refresh_folder_settings(data);
+}
+
 static void backup_clicked(GtkButton *button,gpointer data) {
   (void)button;
   AppState *state=data;
@@ -436,6 +521,7 @@ static void navigate(GtkButton *button, gpointer data) {
 static void destroy_state(gpointer data) {
   AppState *state=data;
   ef_store_close(&state->store);
+  ef_folder_settings_clear(&state->folder_settings);
   g_free(state);
 }
 typedef struct { GtkApplication *app; GtkWidget *window; GtkWidget *password; GtkWidget *message; } UnlockState;
@@ -497,6 +583,12 @@ static void activate(GtkApplication *app,gpointer data) {
   (void)data;
   if(!unlocked_session && !g_getenv("EVOLUFISICO_DB_PASSPHRASE")) {show_unlock(app);return;}
   AppState *state=g_new0(AppState,1);
+  GError *folder_load_error=NULL;
+  if(!ef_folder_settings_load(&state->folder_settings,&folder_load_error)) {
+    g_warning("Configuração de pasta não carregada: %s",
+      folder_load_error ? folder_load_error->message : "erro");
+    g_clear_error(&folder_load_error);
+  }
   GError *error=NULL;
   if(!ef_store_open(&state->store,&error)) {
     g_warning("SQLite indisponível: %s",error->message);
@@ -537,7 +629,7 @@ static void activate(GtkApplication *app,gpointer data) {
       gtk_box_append(GTK_BOX(form),state->client_entry);
       gtk_box_append(GTK_BOX(form),save);
       gtk_box_append(GTK_BOX(page),form);
-      state->status=gtk_label_new("Dados locais: prévia sem criptografia.");
+      state->status=gtk_label_new("Banco SQLCipher criptografado: prévia técnica.");
       gtk_widget_set_halign(state->status,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),state->status);
       GtkWidget *edit_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
@@ -594,7 +686,12 @@ static void activate(GtkApplication *app,gpointer data) {
       state->assessment_folder=gtk_entry_new();
       gtk_entry_set_placeholder_text(GTK_ENTRY(state->assessment_folder),
         "Pasta para cópia criptografada após salvar (opcional)");
+      gtk_editable_set_editable(GTK_EDITABLE(state->assessment_folder),FALSE);
       gtk_box_append(GTK_BOX(page),state->assessment_folder);
+      GtkWidget *folder_hint=gtk_label_new("Configure a pasta em Configurações. Cópias são feitas apenas ao salvar avaliações.");
+      gtk_label_set_wrap(GTK_LABEL(folder_hint),TRUE);
+      gtk_widget_set_halign(folder_hint,GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(page),folder_hint);
       GtkWidget *save_assessment_button=gtk_button_new_with_label("Registrar avaliação");
       gtk_box_append(GTK_BOX(page),save_assessment_button);
       state->assessment_status=gtk_label_new("Avaliações protegidas por SQLCipher. Cópia de pasta opcional; apenas dados fictícios.");
@@ -630,7 +727,7 @@ static void activate(GtkApplication *app,gpointer data) {
       gtk_box_append(GTK_BOX(page),state->charge_description);
       GtkWidget *save_charge_button=gtk_button_new_with_label("Registrar cobrança");
       gtk_box_append(GTK_BOX(page),save_charge_button);
-      state->charge_status=gtk_label_new("Protótipo sem criptografia — apenas dados fictícios.");
+      state->charge_status=gtk_label_new("Cobranças no SQLCipher; utilize apenas dados fictícios.");
       gtk_box_append(GTK_BOX(page),state->charge_status);
       GtkWidget *show_charges_button=gtk_button_new_with_label("Consultar cobranças");
       gtk_box_append(GTK_BOX(page),show_charges_button);
@@ -659,6 +756,30 @@ static void activate(GtkApplication *app,gpointer data) {
       g_signal_connect(save_charge_button,"clicked",G_CALLBACK(save_charge),state);
       gtk_widget_set_sensitive(save_charge_button,state->store.db!=NULL);
     }else if(i==5){
+      GtkWidget *folder_title=gtk_label_new("Pasta para cópias criptografadas");
+      gtk_widget_add_css_class(folder_title,"heading");
+      gtk_widget_set_halign(folder_title,GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(page),folder_title);
+      state->folder_settings_label=gtk_label_new("Nenhuma pasta selecionada.");
+      gtk_widget_set_halign(state->folder_settings_label,GTK_ALIGN_START);
+      gtk_label_set_selectable(GTK_LABEL(state->folder_settings_label),TRUE);
+      gtk_label_set_wrap(GTK_LABEL(state->folder_settings_label),TRUE);
+      gtk_box_append(GTK_BOX(page),state->folder_settings_label);
+      GtkWidget *folder_buttons=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+      GtkWidget *choose_folder=gtk_button_new_with_label("Selecionar pasta...");
+      GtkWidget *validate_folder=gtk_button_new_with_label("Verificar pasta");
+      GtkWidget *clear_folder=gtk_button_new_with_label("Remover seleção");
+      gtk_box_append(GTK_BOX(folder_buttons),choose_folder);
+      gtk_box_append(GTK_BOX(folder_buttons),validate_folder);
+      gtk_box_append(GTK_BOX(folder_buttons),clear_folder);
+      gtk_box_append(GTK_BOX(page),folder_buttons);
+      state->folder_settings_status=gtk_label_new("");
+      gtk_label_set_wrap(GTK_LABEL(state->folder_settings_status),TRUE);
+      gtk_widget_set_halign(state->folder_settings_status,GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(page),state->folder_settings_status);
+      g_signal_connect(choose_folder,"clicked",G_CALLBACK(choose_folder_clicked),state);
+      g_signal_connect(validate_folder,"clicked",G_CALLBACK(validate_folder_clicked),state);
+      g_signal_connect(clear_folder,"clicked",G_CALLBACK(clear_folder_clicked),state);
       state->backup_entry=gtk_entry_new();
       gtk_entry_set_placeholder_text(GTK_ENTRY(state->backup_entry),"Caminho completo do arquivo de backup .sqlite");
       gtk_box_append(GTK_BOX(page),state->backup_entry);
@@ -693,6 +814,7 @@ static void activate(GtkApplication *app,gpointer data) {
     gtk_box_append(GTK_BOX(sidebar),button);
   }
   refresh_pickers(state);
+  refresh_folder_settings(state);
   gtk_box_append(GTK_BOX(root),sidebar);
   gtk_box_append(GTK_BOX(root),gtk_separator_new(GTK_ORIENTATION_VERTICAL));
   gtk_widget_set_hexpand(stack,TRUE);
