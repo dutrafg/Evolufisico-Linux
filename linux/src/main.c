@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 #include "storage.h"
 #include "folder_settings.h"
+#include "auto_backup.h"
 #include <errno.h>
 #include <math.h>
 
@@ -159,6 +160,26 @@ static void show_charges(GtkButton *button,gpointer data) {
   }
   refresh_charges(state,id);
 }
+/* Never conflate successful SQLCipher commits with optional snapshot failures. */
+static void notify_saved_and_copy(AppState *state, GtkWidget *status, const char *operation) {
+  GError *error=NULL;
+  char *saved_path=NULL;
+  EfAutoBackupResult result=ef_auto_backup_after_change(
+      &state->store,&state->folder_settings,&saved_path,&error);
+  char *message=NULL;
+  if(result==EF_AUTO_BACKUP_CREATED) {
+    message=g_strdup_printf("%s Banco local salvo; cópia criptografada automática: %s",
+                            operation,saved_path ? saved_path : "(sem caminho)");
+  } else if(result==EF_AUTO_BACKUP_SKIPPED) {
+    message=g_strdup_printf("%s Banco local salvo. Configure uma pasta em Configurações para cópias automáticas.",
+                            operation);
+  } else {
+    message=g_strdup_printf("%s Banco local salvo, mas CÓPIA AUTOMÁTICA FALHOU: %s",
+                            operation,error ? error->message : "erro desconhecido");
+  }
+  gtk_label_set_text(GTK_LABEL(status),message);
+  g_free(message);g_free(saved_path);g_clear_error(&error);
+}
 typedef struct { AppState *state; gint64 record_id; gint64 client_id; gboolean assessment; } RecordDeleteRequest;
 static void delete_record_confirmed(GObject *source,GAsyncResult *result,gpointer data) {
   RecordDeleteRequest *request=data;
@@ -189,8 +210,8 @@ static void delete_record_confirmed(GObject *source,GAsyncResult *result,gpointe
   }
   gboolean ok=assessment ? ef_store_delete_assessment_for_client(&state->store,id,client,&error) : ef_store_delete_charge_for_client(&state->store,id,client,&error);
   if(ok) {
-    gtk_label_set_text(GTK_LABEL(status),"Registro excluído.");
     if(assessment)refresh_assessments(state,client);else refresh_charges(state,client);
+    notify_saved_and_copy(state,status,"Registro excluído.");
   }else{
     gtk_label_set_text(GTK_LABEL(status),error ? error->message : "Falha ao excluir.");
     g_clear_error(&error);
@@ -226,25 +247,7 @@ static void save_assessment(GtkButton *button,gpointer data) {
   const char *date=gtk_editable_get_text(GTK_EDITABLE(state->assessment_date));
   GError *error=NULL;
   if(ef_store_add_assessment(&state->store,id,date,weight,height,&error)) {
-    const char *folder=gtk_editable_get_text(GTK_EDITABLE(state->assessment_folder));
-    if(folder && *folder) {
-      char *saved_path=NULL;
-      GError *snapshot_error=NULL;
-      if(ef_store_snapshot_to_folder(&state->store,folder,&saved_path,&snapshot_error)) {
-        gtk_label_set_text(GTK_LABEL(state->assessment_status),
-          "Avaliação salva no SQLCipher e cópia criptografada gravada na pasta.");
-      }else{
-        char *warning=g_strdup_printf("Avaliação SALVA no SQLCipher, mas a cópia na pasta FALHOU: %s",
-          snapshot_error ? snapshot_error->message : "erro desconhecido");
-        gtk_label_set_text(GTK_LABEL(state->assessment_status),warning);
-        g_free(warning);
-      }
-      g_free(saved_path);
-      g_clear_error(&snapshot_error);
-    }else{
-      gtk_label_set_text(GTK_LABEL(state->assessment_status),
-        "Avaliação salva no SQLCipher. Nenhuma pasta de cópia configurada.");
-    }
+    notify_saved_and_copy(state,state->assessment_status,"Avaliação registrada.");
     refresh_assessments(state,id);
     gtk_editable_set_text(GTK_EDITABLE(state->assessment_weight),"");
     gtk_editable_set_text(GTK_EDITABLE(state->assessment_height),"");
@@ -262,8 +265,8 @@ static void receive_charge_confirmed(GObject *source,GAsyncResult *result,gpoint
   if(response==1) {
     GError *error=NULL;
     if(ef_store_receive_charge(&request->state->store,request->charge_id,request->client_id,&error)) {
-      gtk_label_set_text(GTK_LABEL(request->state->charge_status),"Recebimento confirmado e salvo no SQLite criptografado.");
       refresh_charges(request->state,request->client_id);
+      notify_saved_and_copy(request->state,request->state->charge_status,"Recebimento confirmado.");
       gtk_editable_set_text(GTK_EDITABLE(request->state->charge_receive_id),"");
     }else{
       gtk_label_set_text(GTK_LABEL(request->state->charge_status),error ? error->message : "Não foi possível receber a cobrança.");
@@ -295,8 +298,8 @@ static void save_charge(GtkButton *button,gpointer data) {
   const char *description=gtk_editable_get_text(GTK_EDITABLE(state->charge_description));
   GError *error=NULL;
   if(ef_store_add_charge(&state->store,id,cents,description,&error)) {
-    gtk_label_set_text(GTK_LABEL(state->charge_status),"Cobrança pendente registrada no SQLite criptografado.");
     refresh_charges(state,id);
+    notify_saved_and_copy(state,state->charge_status,"Cobrança pendente registrada.");
     gtk_editable_set_text(GTK_EDITABLE(state->charge_cents),"");
     gtk_editable_set_text(GTK_EDITABLE(state->charge_description),"");
   }else{
@@ -315,8 +318,8 @@ static void delete_client_confirmed(GObject *source,GAsyncResult *result,gpointe
   if(response!=1)return;
   GError *error=NULL;
   if(ef_store_delete_client(&state->store,id,&error)) {
-    gtk_label_set_text(GTK_LABEL(state->status),"Cliente e registros associados excluídos.");
     refresh_clients(state);
+    notify_saved_and_copy(state,state->status,"Cliente e registros associados excluídos.");
   }else{
     gtk_label_set_text(GTK_LABEL(state->status),error ? error->message : "Erro na exclusão.");
     g_clear_error(&error);
@@ -350,8 +353,8 @@ static void rename_client_clicked(GtkButton *button,gpointer data) {
   g_strstrip(name);
   GError *error=NULL;
   if(ef_store_rename_client(&state->store,id,name,&error)) {
-    gtk_label_set_text(GTK_LABEL(state->status),"Cliente atualizado.");
     refresh_clients(state);
+    notify_saved_and_copy(state,state->status,"Cliente atualizado.");
   }else{
     gtk_label_set_text(GTK_LABEL(state->status),error ? error->message : "Falha na edição.");
     g_clear_error(&error);
@@ -374,12 +377,12 @@ static void add_client(GtkButton *button, gpointer data) {
     g_clear_error(&error);
   } else {
     gtk_editable_set_text(GTK_EDITABLE(state->client_entry),"");
-    gtk_label_set_text(GTK_LABEL(state->status),"Cliente salvo no SQLite local.");
     refresh_clients(state);
+    notify_saved_and_copy(state,state->status,"Cliente cadastrado.");
   }
   g_free(clean);
 }
-/* The chosen folder is shared by Settings and the encrypted assessment copy.
+/* The chosen folder is shared by Settings and encrypted automatic copies.
  * GTK folder choice is saved only after validation; offline mounts remain configured.
  */
 static void refresh_folder_settings(AppState *state) {
@@ -396,7 +399,7 @@ static void refresh_folder_settings(AppState *state) {
       GError *error=NULL;
       gboolean valid=ef_folder_settings_validate(folder,&error);
       gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
-        valid ? "Pasta configurada e acessível. Nenhuma sincronização em segundo plano foi ativada."
+        valid ? "Pasta acessível: cópias criptografadas após alterações. Sem sincronização contínua em segundo plano."
               : "Pasta configurada, mas indisponível ou sem permissão. Verifique a montagem antes de salvar.");
       g_clear_error(&error);
     }
@@ -482,8 +485,18 @@ static void restore_confirmed(GObject *source,GAsyncResult *result,gpointer data
   if(response!=1){g_free(request->path);g_free(request);return;}
   GError *error=NULL;
   if(ef_store_restore(&state->store,request->path,&error)) {
-    gtk_label_set_text(GTK_LABEL(state->settings_status),"Restauração concluída. Confira os dados.");
     refresh_clients(state);
+    if(state->assessment_list) {
+      GtkWidget *child=NULL;
+      while((child=gtk_widget_get_first_child(state->assessment_list)))
+        gtk_list_box_remove(GTK_LIST_BOX(state->assessment_list),child);
+    }
+    if(state->charge_list) {
+      GtkWidget *child=NULL;
+      while((child=gtk_widget_get_first_child(state->charge_list)))
+        gtk_list_box_remove(GTK_LIST_BOX(state->charge_list),child);
+    }
+    notify_saved_and_copy(state,state->settings_status,"Restauração concluída.");
   }else{
     gtk_label_set_text(GTK_LABEL(state->settings_status),error ? error->message : "Restauração falhou.");
     g_clear_error(&error);
@@ -688,7 +701,7 @@ static void activate(GtkApplication *app,gpointer data) {
         "Pasta para cópia criptografada após salvar (opcional)");
       gtk_editable_set_editable(GTK_EDITABLE(state->assessment_folder),FALSE);
       gtk_box_append(GTK_BOX(page),state->assessment_folder);
-      GtkWidget *folder_hint=gtk_label_new("Configure a pasta em Configurações. Cópias são feitas apenas ao salvar avaliações.");
+      GtkWidget *folder_hint=gtk_label_new("Configure em Configurações. Alterações em Clientes, Avaliações e Cobranças criam cópias criptografadas.");
       gtk_label_set_wrap(GTK_LABEL(folder_hint),TRUE);
       gtk_widget_set_halign(folder_hint,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),folder_hint);
