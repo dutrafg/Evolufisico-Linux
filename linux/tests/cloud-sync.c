@@ -53,6 +53,13 @@ int main(void) {
   guint sent=0,pending=0;
   g_assert_false(ef_cloud_upload_pending("-invalid",folder,&sent,&pending,&e));
   g_clear_error(&e);
+  /* Failed first transfer must expose the complete ten-item backlog. */
+  g_setenv("MOCK_RCLONE_FAIL","1",TRUE);
+  g_assert_false(ef_cloud_upload_pending("drive_qa",folder,&sent,&pending,&e));
+  g_assert_nonnull(e);g_clear_error(&e);
+  g_assert_cmpuint(sent,==,0);g_assert_cmpuint(pending,==,10);
+  g_setenv("MOCK_RCLONE_FAIL","0",TRUE);
+  g_assert_cmpint(g_unlink(log),==,0); /* Reset mock call counter. */
   g_assert_true(ef_cloud_upload_pending("drive_qa",folder,&sent,&pending,&e));
   g_assert_no_error(e);g_assert_cmpuint(sent,==,8);g_assert_cmpuint(pending,==,2);
   g_assert_cmpuint(call_count(log),==,8);
