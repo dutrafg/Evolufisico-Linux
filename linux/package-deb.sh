@@ -15,6 +15,7 @@ Priority: optional
 Architecture: $(dpkg --print-architecture)
 Maintainer: EvoluFisico Desktop <noreply@github.com>
 Depends: libgtk-4-1 (>= 4.10), libsqlcipher0
+Recommends: rclone
 Description: EvoluFisico Linux GTK4 preview
  Native GTK4 development preview. Not suitable for clinical data.
 EOF
