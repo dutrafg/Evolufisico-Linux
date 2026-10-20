@@ -23,6 +23,22 @@ Para gerar o instalador `.deb`:
 bash linux/package-deb.sh
 ```
 
+### Instalação da prévia DEB 0.1.1 (Ubuntu 24.04)
+
+Baixe o artefato `evolufisico-linux-gtk4-deb` da execução aprovada em **GitHub → Actions → EvoluFisico Linux GTK4 - CI** e extraia o arquivo `evolufisico-linux_0.1.1_amd64.deb`. A versão 0.1.0 tinha uma dependência incorreta em `libsqlcipher0`; a versão 0.1.1 utiliza `libsqlcipher1`, disponível no repositório *universe* do Ubuntu 24.04.
+
+Dentro da pasta em que extraiu o pacote, execute:
+
+```bash
+sudo apt update
+sudo apt install ./evolufisico-linux_0.1.1_amd64.deb
+```
+
+Caso `libsqlcipher1` não seja encontrado no Ubuntu, verifique se o repositório **universe** está habilitado (`sudo add-apt-repository universe && sudo apt update`) antes de tentar novamente. **Não** force dependências com `dpkg --force-depends`; a biblioteca SQLCipher é obrigatória para abrir o banco criptografado.
+
+O instalador é compilado e testado no Ubuntu 24.04 x86_64. Em outras versões/distribuições o nome ou ABI das bibliotecas pode variar; faça homologação específica antes do uso. A instalação por arquivo local não configura atualizações automáticas do GitHub.
+
+
 Veja [documentação completa](linux/README.md) e [auditoria de QA e segurança](linux/QA-SECURITY-AUDIT-2026-10-19.md).
 
 ## Organização
