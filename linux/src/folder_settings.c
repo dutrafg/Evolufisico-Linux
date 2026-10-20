@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "folder_settings.h"
 #include <gio/gio.h>
 #include <glib/gstdio.h>
