@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "../src/folder_settings.h"
 #include <glib.h>
 #include <glib/gstdio.h>
