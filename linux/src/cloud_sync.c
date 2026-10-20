@@ -201,6 +201,10 @@ gboolean ef_cloud_upload_pending(const char *remote,const char *folder,
   GPtrArray *names=NULL;
   if(ok){names=snapshot_names(folder,error);ok=names!=NULL;}
   guint completed=0,left=0;
+  /* Build the complete backlog before any network request. A failure on
+   * the first transfer must still report ALL remaining encrypted copies. */
+  GPtrArray *pending=g_ptr_array_new_with_free_func(g_free);
+  GPtrArray *digests=g_ptr_array_new_with_free_func(g_free);
   if(ok) {
     for(guint i=0;i<names->len;i++) {
       const char *name=g_ptr_array_index(names,i);
@@ -216,22 +220,30 @@ gboolean ef_cloud_upload_pending(const char *remote,const char *folder,
       char *previous=g_key_file_get_string(ledger,"uploaded",name,NULL);
       gboolean already=previous && g_strcmp0(previous,digest)==0;
       g_free(previous);
-      if(!already) {
-        left++;
-        if(completed<CLOUD_BATCH_LIMIT) {
-          if(!stage_and_send(folder,name,remote,error)) {
-            ok=FALSE;g_free(digest);break;
-          }
-          g_key_file_set_string(ledger,"uploaded",name,digest);
-          if(!write_keyfile(ledger,ledgerpath,error)) {
-            ok=FALSE;g_free(digest);break;
-          }
-          completed++;left--;
-        }
+      if(already)g_free(digest);
+      else {
+        g_ptr_array_add(pending,g_strdup(name));
+        g_ptr_array_add(digests,digest);
       }
-      g_free(digest);
     }
   }
+  left=pending->len;
+  if(ok) {
+    for(guint i=0;i<MIN(pending->len,CLOUD_BATCH_LIMIT);i++) {
+      const char *name=g_ptr_array_index(pending,i);
+      const char *digest=g_ptr_array_index(digests,i);
+      if(!stage_and_send(folder,name,remote,error)) {
+        ok=FALSE;break;
+      }
+      g_key_file_set_string(ledger,"uploaded",name,digest);
+      if(!write_keyfile(ledger,ledgerpath,error)) {
+        ok=FALSE;break;
+      }
+      completed++;left--;
+    }
+  }
+  g_ptr_array_unref(pending);
+  g_ptr_array_unref(digests);
   if(uploaded)*uploaded=completed;
   if(remaining)*remaining=left;
   if(names)g_ptr_array_unref(names);
