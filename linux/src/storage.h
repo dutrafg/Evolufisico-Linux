@@ -30,3 +30,6 @@ void ef_store_set_passphrase(const char *passphrase);
 gboolean ef_store_receive_charge(EfStore *store,gint64 charge_id,gint64 client_id,GError **error);
 
 gboolean ef_store_snapshot_to_folder(EfStore *store,const char *folder,char **saved_path,GError **error);
+
+/* Validate integrity and schema of a SQLCipher snapshot using the active key. */
+gboolean ef_store_verify_snapshot(const char *path, GError **error);
