@@ -192,3 +192,19 @@ As configurações guardam apenas o caminho local. O banco e os snapshots são c
 - O teste `auto-backup` cobre nove cenários de cópia após alteração ou recuperação, permissões privadas, arquivo criptografado, desconexão de pasta, preservação do SQLCipher local e restauração.
 
 **Prévia experimental**, sem homologação em máquina Linux física ou liberação para dados clínicos reais.
+
+
+## Etapa 3 Insync — fila persistente e recuperação após reconexão
+
+- **Fila local criptografada:** quando a pasta de destino é configurada, cada operação salva com sucesso no SQLCipher cria antes uma cópia criptografada em \`$XDG_DATA_HOME/evolufisico/pending-snapshots\` (normalmente \`~/.local/share/evolufisico/pending-snapshots\`). Só depois o aplicativo tenta transferi-la para a pasta selecionada.
+- **Pasta indisponível:** a gravação no banco continua válida e a cópia permanece **PENDENTE** na fila local, com aviso distinto de perda de dados. Não há rollback da alteração somente porque a cópia falhou.
+- **Retomada:** com o aplicativo aberto e desbloqueado, tenta reenviar cópias pendentes ao iniciar e a cada **20 segundos**. Há também o botão **Reenviar pendentes** em Configurações. As cópias são retomadas quando a pasta volta a estar disponível.
+- **Reinício:** os arquivos cifrados na fila sobrevivem ao fechamento e reinício do processo; não ficam apenas em memória.
+- **Sem sobrescrita:** cópias são verificadas pelo SQLCipher antes e depois da transferência. A transferência usa arquivo temporário, sincronização de disco e publicação sem substituir arquivos existentes. Caso o nome já exista com conteúdo diferente, a cópia continua pendente para revisão; se for idêntica, o reenvio é tratado como idempotente.
+- **Concorrência:** uma trava local no processo de replay evita duas instâncias tentando enviar a mesma fila ao mesmo tempo. O tamanho da fila é limitado a **256 cópias**; ao atingir o limite, o usuário recebe erro explícito e precisa liberar espaço ou restabelecer o destino. Nenhuma cópia antiga é apagada automaticamente.
+- **Sem pasta escolhida:** nenhuma cópia automática nova é enfileirada. Arquivos já pendentes são preservados e podem ser enviados quando uma nova pasta válida é selecionada.
+- **Privacidade:** a fila contém cópias SQLCipher cifradas e deve permanecer privada. As cópias transferidas continuam exigindo a senha original do banco.
+
+### Limitações e próximos bloqueadores
+
+A retomada funciona **somente durante a execução do aplicativo**: ainda não existe daemon no login, sincronização com Google Drive via OAuth, comparação bidirecional de arquivos nem resolução de conflitos entre dispositivos. A interface GTK4 executa os envios de forma síncrona e pode ficar momentaneamente ocupada com arquivos muito grandes. Sistemas de arquivos que não suportem criação de links rígidos ou confirmação por \`fsync\` podem recusar transferências; a fila preserva as cópias até uma ação segura. Uma pasta montada que vire um diretório comum após remoção de disco exige ainda verificação explícita de identidade de montagem antes da homologação. **Não utilizar dados clínicos reais.**
