@@ -168,8 +168,10 @@ static void notify_saved_and_copy(AppState *state, GtkWidget *status, const char
       &state->store,&state->folder_settings,&saved_path,&error);
   char *message=NULL;
   if(result==EF_AUTO_BACKUP_CREATED) {
+    char *filename=saved_path ? g_path_get_basename(saved_path) : NULL;
     message=g_strdup_printf("%s Banco local salvo; cópia criptografada automática: %s",
-                            operation,saved_path ? saved_path : "(sem caminho)");
+                            operation,filename ? filename : "(sem caminho)");
+    g_free(filename);
   } else if(result==EF_AUTO_BACKUP_SKIPPED) {
     message=g_strdup_printf("%s Banco local salvo. Configure uma pasta em Configurações para cópias automáticas.",
                             operation);
@@ -643,6 +645,8 @@ static void activate(GtkApplication *app,gpointer data) {
       gtk_box_append(GTK_BOX(form),save);
       gtk_box_append(GTK_BOX(page),form);
       state->status=gtk_label_new("Banco SQLCipher criptografado: prévia técnica.");
+      gtk_label_set_wrap(GTK_LABEL(state->status),TRUE);
+      gtk_widget_set_halign(state->status,GTK_ALIGN_START);
       gtk_widget_set_halign(state->status,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),state->status);
       GtkWidget *edit_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
@@ -708,6 +712,8 @@ static void activate(GtkApplication *app,gpointer data) {
       GtkWidget *save_assessment_button=gtk_button_new_with_label("Registrar avaliação");
       gtk_box_append(GTK_BOX(page),save_assessment_button);
       state->assessment_status=gtk_label_new("Avaliações protegidas por SQLCipher. Cópia de pasta opcional; apenas dados fictícios.");
+      gtk_label_set_wrap(GTK_LABEL(state->assessment_status),TRUE);
+      gtk_widget_set_halign(state->assessment_status,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),state->assessment_status);
       GtkWidget *show_assessments_button=gtk_button_new_with_label("Consultar avaliações");
       gtk_box_append(GTK_BOX(page),show_assessments_button);
@@ -741,6 +747,8 @@ static void activate(GtkApplication *app,gpointer data) {
       GtkWidget *save_charge_button=gtk_button_new_with_label("Registrar cobrança");
       gtk_box_append(GTK_BOX(page),save_charge_button);
       state->charge_status=gtk_label_new("Cobranças no SQLCipher; utilize apenas dados fictícios.");
+      gtk_label_set_wrap(GTK_LABEL(state->charge_status),TRUE);
+      gtk_widget_set_halign(state->charge_status,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),state->charge_status);
       GtkWidget *show_charges_button=gtk_button_new_with_label("Consultar cobranças");
       gtk_box_append(GTK_BOX(page),show_charges_button);
@@ -806,6 +814,7 @@ static void activate(GtkApplication *app,gpointer data) {
       gtk_box_append(GTK_BOX(page),backup);
       gtk_box_append(GTK_BOX(page),integrity);
       state->settings_status=gtk_label_new("Prévia experimental: backups SQLCipher criptografados.");
+      gtk_label_set_wrap(GTK_LABEL(state->settings_status),TRUE);
       gtk_widget_set_halign(state->settings_status,GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(page),state->settings_status);
       g_signal_connect(backup,"clicked",G_CALLBACK(backup_clicked),state);
