@@ -99,9 +99,13 @@ int main(void) {
   GPtrArray *rows=ef_store_list_clients(&store,&error);
   g_assert_no_error(error);g_assert_cmpuint(rows->len,==,1);
   g_ptr_array_unref(rows);
+  /* Simulate a real app shutdown and restart while the target is offline. */
+  ef_store_close(&store);
   ef_folder_settings_clear(&settings);
+  g_assert_true(ef_store_open(&store,&error));g_assert_no_error(error);
   g_assert_true(ef_folder_settings_load(&settings,&error));g_assert_no_error(error);
   g_assert_cmpstr(settings.folder,==,folder);
+  g_assert_cmpuint(ef_auto_backup_pending_count(&error),==,1);g_assert_no_error(error);
   guint sent=123,remaining=123;
   g_assert_false(ef_auto_backup_flush(&settings,&sent,&remaining,&error));
   g_assert_nonnull(error);g_clear_error(&error);
@@ -122,6 +126,14 @@ int main(void) {
   char *queued_file=g_build_filename(queuedir,queued_name,NULL);
   g_assert_true(ef_store_verify_snapshot(queued_file,&error));g_assert_no_error(error);
   g_assert_cmpint(g_rename(disconnected,folder),==,0);
+
+  /* A malicious symlink in the private queue must never be followed. */
+  char *malicious=g_build_filename(queuedir,"evolufisico-0000000000000000-symlink.sqlite",NULL);
+  g_assert_cmpint(symlink(queued_file,malicious),==,0);
+  g_assert_false(ef_auto_backup_flush(&settings,&sent,&remaining,&error));
+  g_assert_nonnull(error);g_clear_error(&error);
+  g_assert_cmpuint(remaining,==,2);
+  g_assert_cmpint(g_unlink(malicious),==,0);g_free(malicious);
 
   /* Never overwrite an existing foreign file; leave the encrypted snapshot queued. */
   char *conflict=g_build_filename(folder,queued_name,NULL);
