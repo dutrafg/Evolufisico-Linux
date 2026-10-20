@@ -81,6 +81,17 @@ jobs:
           dpkg-deb --contents linux/dist/*.deb | tee /tmp/evolufisico-deb-files.txt
           grep -q 'usr/bin/evolufisico-linux' /tmp/evolufisico-deb-files.txt
           grep -q 'usr/share/applications/br.com.evolufisico.desktop' /tmp/evolufisico-deb-files.txt
+      - name: Verify runtime dependencies and install generated DEB
+        run: |
+          deb="$(find linux/dist -maxdepth 1 -type f -name 'evolufisico-linux_0.1.1_*.deb' -print -quit)"
+          test -n "$deb"
+          dpkg-deb --field "$deb" Depends | tee /tmp/evolufisico-deb-depends.txt
+          grep -Eq '(^|, )libsqlcipher1([ ,]|$)' /tmp/evolufisico-deb-depends.txt
+          ! grep -q 'libsqlcipher0' /tmp/evolufisico-deb-depends.txt
+          sudo apt-get install -y "./$deb"
+          dpkg-query -W -f='${Status}\n' evolufisico-linux | grep -qx 'install ok installed'
+          test -x /usr/bin/evolufisico-linux
+          ! ldd /usr/bin/evolufisico-linux | grep 'not found'
       - name: Upload Debian preview
         uses: actions/upload-artifact@v4
         with:
