@@ -208,37 +208,3 @@ As configurações guardam apenas o caminho local. O banco e os snapshots são c
 ### Limitações e próximos bloqueadores
 
 A retomada funciona **somente durante a execução do aplicativo**: ainda não existe daemon no login, sincronização com Google Drive via OAuth, comparação bidirecional de arquivos nem resolução de conflitos entre dispositivos. A interface GTK4 executa os envios de forma síncrona e pode ficar momentaneamente ocupada com arquivos muito grandes. Sistemas de arquivos que não suportem criação de links rígidos ou confirmação por \`fsync\` podem recusar transferências; a fila preserva as cópias até uma ação segura. Uma pasta montada que vire um diretório comum após remoção de disco exige ainda verificação explícita de identidade de montagem antes da homologação. **Não utilizar dados clínicos reais.**
-
-## Etapa 4 — Google Drive com OAuth (via rclone)
-
-A conexão utiliza **rclone**, que abre o fluxo OAuth do Google no navegador e guarda os tokens na sua própria configuração. O EvoluFisico **não solicita sua senha Google, nem lê ou armazena tokens OAuth**. A interface salva apenas o nome do remote em `~/.config/evolufisico/drive-remote.ini` com permissões restritas.
-
-### Primeira conexão no computador Linux
-
-1. Instale rclone, por exemplo: `sudo apt install rclone` (verifique se a versão atende aos requisitos atuais do Google).
-2. Em **Configurações → Google Drive**, clique **Configurar OAuth...**. Um terminal `x-terminal-emulator` deve abrir com `rclone config`. Se faltar terminal, abra um manualmente e execute `rclone config`.
-3. Crie um remote, por exemplo `meu_drive`, selecione o backend **Google Drive** e autorize no navegador. Use preferencialmente o escopo `drive.file`, que limita o acesso aos arquivos criados pelo aplicativo OAuth. Consulte [documentação do rclone](https://rclone.org/drive/).
-4. **Importante (2026):** o cliente OAuth compartilhado do rclone está sendo descontinuado. Recomenda-se criar seu **próprio Client ID OAuth Desktop** no Google Cloud e informá-lo durante a configuração. Guarde os segredos somente na configuração local do rclone; nunca adicione `rclone.conf` ao GitHub.
-5. Digite o nome exato do remote no EvoluFisico, pressione **Salvar conta** e **Testar conexão**. A verificação usa `rclone lsd <remote>:` sem exibir os nomes de arquivos ou credenciais.
-6. Escolha uma **pasta local para backups criptografados** e clique em **Enviar backups criptografados**. O aplicativo verifica todos os arquivos, prepara uma área temporária privada, executa `rclone copy` para `<remote>:EvoluFisico-Backups` com `--immutable` e não apaga os arquivos locais. A operação é assíncrona para não travar a interface.
-
-### Limitações e privacidade
-
-- A implementação **não faz sincronização bidirecional** nem baixa documentos do Drive. Upload é **manual** nesta etapa; a fila local automática continua independente. Uma etapa posterior poderá agendar envio seguro à nuvem após tratar estados e conflitos.
-- Arquivos de outros tipos, links simbólicos e arquivos sem integridade SQLCipher válida não são incluídos. Arquivos que já existem e diferem não devem ser sobrescritos; o rclone sinaliza conflito com `--immutable`.
-- O rclone mantém seus próprios tokens OAuth em `rclone.conf` (a menos que seja configurado para armazenamento protegido); proteja esse arquivo com permissões privadas e preferencialmente senha no gerenciador de configuração.
-- O teste automatizado usa um **rclone simulado** e dados fictícios. Não prova que um login Google real, as cotas do Google Drive ou a conectividade do usuário funcionam; isto exige autorização e homologação em uma máquina Linux.
-- A versão continua **prévia técnica sem homologação para dados clínicos reais**.
-
-## Etapa 5 — Envio automático opt-in para o Google Drive
-
-- Em **Configurações → Google Drive**, selecione uma conta rclone autorizada, escolha a pasta local de snapshots SQLCipher e marque **Sincronização automática**. A opção é desativada por padrão e persistente.
-- Após mudanças no banco, o programa pode enviar novas cópias criptografadas de forma assíncrona. Também verifica pendências a cada **60 segundos**, apenas com o aplicativo aberto e desbloqueado.
-- O envio usa `rclone copyto --immutable`, sem excluir arquivos locais ou remotos e limitado a **oito arquivos por ciclo**.
-- Um registro de SHA-256 por conta evita reenvios desnecessários entre reinícios; uma falha mantém cópias sem confirmação. O contador considera toda a fila, inclusive se o primeiro envio falhar.
-- Falhas de rede ativam tentativas automáticas com intervalos progressivos de **1, 2, 4, 8 e até 16 minutos**.
-- Há verificações de integridade SQLCipher antes da transferência e bloqueios para symlinks e nomes perigosos.
-
-**Limitações:** esta etapa implementa somente backup incremental **Linux → Google Drive**. Não é sincronização bidirecional, não oferece download automático, exclusões espelhadas, resolução de conflitos, verificação de remoções remotas nem daemon independente do aplicativo. O registro local confirma apenas o resultado reportado pelo rclone.
-
-**QA:** o teste `cloud-sync` usa dados fictícios e rclone simulado, cobrindo ativação, filas, reconexão, deduplicação, lotes, múltiplas contas no registro e arquivos inválidos. Os testes ASan/UBSan executam no GitHub Actions. **Não usar dados clínicos reais antes de homologação e revisão independente de segurança.**
