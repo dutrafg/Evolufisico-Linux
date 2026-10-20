@@ -8,7 +8,17 @@ on:
   workflow_dispatch:
 jobs:
   build-deb:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ubuntu: ubuntu-24.04
+            suffix: ubuntu24.04
+            expected_sqlcipher: libsqlcipher1
+          - ubuntu: ubuntu-26.04
+            suffix: ubuntu26.04
+            expected_sqlcipher: libsqlcipher2
+    runs-on: ${{ matrix.ubuntu }}
     permissions:
       contents: read
     steps:
@@ -73,7 +83,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: evolufisico-linux-visual-qa
+          name: evolufisico-linux-visual-qa-${{ matrix.suffix }}
           path: linux/qa-artifacts/*.png
           if-no-files-found: ignore
       - name: Verify Debian package contents
@@ -83,11 +93,11 @@ jobs:
           grep -q 'usr/share/applications/br.com.evolufisico.desktop' /tmp/evolufisico-deb-files.txt
       - name: Verify runtime dependencies and install generated DEB
         run: |
-          deb="$(find linux/dist -maxdepth 1 -type f -name 'evolufisico-linux_0.1.1_*.deb' -print -quit)"
+          deb="$(find linux/dist -maxdepth 1 -type f -name 'evolufisico-linux_0.1.2+${{ matrix.suffix }}_*.deb' -print -quit)"
           test -n "$deb"
           dpkg-deb --field "$deb" Depends | tee /tmp/evolufisico-deb-depends.txt
-          grep -Eq '(^|, )libsqlcipher1([ ,]|$)' /tmp/evolufisico-deb-depends.txt
-          ! grep -q 'libsqlcipher0' /tmp/evolufisico-deb-depends.txt
+          grep -Eq '(^|, )${{ matrix.expected_sqlcipher }}([ ,]|$)' /tmp/evolufisico-deb-depends.txt
+          test "$(grep -oE 'libsqlcipher[012]' /tmp/evolufisico-deb-depends.txt | sort -u)" = '${{ matrix.expected_sqlcipher }}'
           sudo apt-get install -y "./$deb"
           dpkg-query -W -f='${Status}\n' evolufisico-linux | grep -qx 'install ok installed'
           test -x /usr/bin/evolufisico-linux
@@ -95,5 +105,5 @@ jobs:
       - name: Upload Debian preview
         uses: actions/upload-artifact@v4
         with:
-          name: evolufisico-linux-gtk4-deb
+          name: evolufisico-linux-gtk4-deb-${{ matrix.suffix }}
           path: linux/dist/*.deb
