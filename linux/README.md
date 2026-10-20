@@ -178,3 +178,17 @@ O aplicativo Linux está em estágio de **prévia técnica**. O pipeline automat
 ### Privacidade
 
 As configurações guardam apenas o caminho local. O banco e os snapshots são cifrados por SQLCipher, mas **metadados de nome e quantidade de backups ficam visíveis no sistema de arquivos**. Não use dados reais até a homologação Linux e revisão independente de segurança.
+
+
+## Cópias automáticas criptografadas após alterações — etapa 2 Insync
+
+- Depois que uma pasta de destino for configurada em **Configurações**, cada gravação feita **pela interface GTK4** cria automaticamente um **novo snapshot completo SQLCipher** com nome único nessa pasta; arquivos existentes não são sobrescritos.
+- Os gatilhos incluem: cadastrar, renomear e excluir cliente; registrar e excluir avaliação; registrar, receber e excluir cobrança; restaurar backup. Exclusões continuam exigindo confirmação.
+- O **banco local sempre é salvo primeiro**. Se a pasta estiver desmontada, sem permissão, cheia ou o snapshot falhar, a operação local permanece concluída; o usuário vê uma mensagem de falha da cópia distinta do resultado do banco. A cópia não é refeita automaticamente enquanto a pasta estiver indisponível (pendente de etapa posterior).
+- Sem pasta selecionada, o aplicativo grava apenas no banco local e informa que as cópias automáticas estão desativadas.
+- O snapshot de Avaliações não é gerado duas vezes: o tratamento foi centralizado e é compartilhado com Clientes e Cobranças.
+- As cópias **não são espelhos bidirecionais**: operações diretamente no sistema de arquivos ou em outros aplicativos não disparam snapshots e não são importadas. Ainda não existe integração OAuth, daemon em segundo plano, integração com Google Drive nem resolução de conflitos.
+- **Retenção:** cada mudança cria um arquivo distinto; ainda não existe limpeza/rotação automática. Monitore o espaço disponível e mantenha backups externos seguros.
+- O teste `auto-backup` cobre nove cenários de cópia após alteração ou recuperação, permissões privadas, arquivo criptografado, desconexão de pasta, preservação do SQLCipher local e restauração.
+
+**Prévia experimental**, sem homologação em máquina Linux física ou liberação para dados clínicos reais.
