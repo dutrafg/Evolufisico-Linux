@@ -946,7 +946,7 @@ static void activate(GtkApplication *app,gpointer data) {
       gtk_box_append(GTK_BOX(page),drive_title);
       GtkWidget *drive_hint=gtk_label_new(
         "Instale rclone e configure sua conta Google no navegador. O EvoluFisico não armazena tokens OAuth. Envio manual de backups SQLCipher; não é sincronização bidirecional.");
-      gtk_label_set_halign(GTK_LABEL(drive_hint),GTK_ALIGN_START);
+      gtk_widget_set_halign(drive_hint,GTK_ALIGN_START);
       gtk_label_set_wrap(GTK_LABEL(drive_hint),TRUE);
       gtk_box_append(GTK_BOX(page),drive_hint);
       state->drive_remote_entry=gtk_entry_new();
