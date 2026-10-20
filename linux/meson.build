@@ -1,4 +1,4 @@
-project('evolufisico-linux', 'c', version: '0.1.1', default_options: ['warning_level=2', 'c_std=c11'])
+project('evolufisico-linux', 'c', version: '0.1.2', default_options: ['warning_level=2', 'c_std=c11'])
 gtk = dependency('gtk4', version: '>=4.10')
 sqlite = dependency('sqlcipher')
 executable('evolufisico-linux', ['src/main.c', 'src/storage.c', 'src/folder_settings.c', 'src/auto_backup.c'], dependencies: [gtk, sqlite], install: true)
