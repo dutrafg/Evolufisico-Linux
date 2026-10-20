@@ -8,6 +8,7 @@
 typedef struct {
   EfStore store;
   EfFolderSettings folder_settings;
+  guint pending_retry_source;
   GtkWidget *folder_settings_label;
   GtkWidget *folder_settings_status;
   GtkWidget *client_list;
@@ -172,6 +173,10 @@ static void notify_saved_and_copy(AppState *state, GtkWidget *status, const char
     message=g_strdup_printf("%s Banco local salvo; cópia criptografada automática: %s",
                             operation,filename ? filename : "(sem caminho)");
     g_free(filename);
+  } else if(result==EF_AUTO_BACKUP_QUEUED) {
+    guint count=ef_auto_backup_pending_count(NULL);
+    message=g_strdup_printf("%s Banco local SALVO. Cópia criptografada aguardando reconexão (%u pendentes). %s",
+                            operation,count,error ? error->message : "A pasta está indisponível ou ocupada.");
   } else if(result==EF_AUTO_BACKUP_SKIPPED) {
     message=g_strdup_printf("%s Banco local salvo. Configure uma pasta em Configurações para cópias automáticas.",
                             operation);
@@ -394,18 +399,58 @@ static void refresh_folder_settings(AppState *state) {
   if(state->folder_settings_label)
     gtk_label_set_text(GTK_LABEL(state->folder_settings_label),folder ? folder : "Nenhuma pasta selecionada.");
   if(state->folder_settings_status) {
-    if(!folder) {
-      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
-        "Pasta não configurada. Escolha onde guardar cópias criptografadas.");
-    }else{
-      GError *error=NULL;
-      gboolean valid=ef_folder_settings_validate(folder,&error);
-      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
-        valid ? "Pasta acessível: cópias criptografadas após alterações. Sem sincronização contínua em segundo plano."
-              : "Pasta configurada, mas indisponível ou sem permissão. Verifique a montagem antes de salvar.");
-      g_clear_error(&error);
+    GError *error=NULL;
+    guint pending=ef_auto_backup_pending_count(&error);
+    gboolean valid=folder && ef_folder_settings_validate(folder,&error);
+    char *message=NULL;
+    if(error) {
+      message=g_strdup_printf("Falha ao verificar pasta ou fila: %s",error->message);
+    }else if(!folder) {
+      message=g_strdup_printf("Pasta não configurada. %u cópia(s) aguardam uma pasta para envio.",pending);
+    }else if(!valid) {
+      message=g_strdup_printf("Pasta desconectada ou sem permissão. %u cópia(s) criptografada(s) pendente(s).",pending);
+    }else {
+      message=g_strdup_printf("Pasta acessível. %u cópia(s) pendente(s). Retentativa automática a cada 20 segundos com o aplicativo aberto.",pending);
     }
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_status),message);
+    g_free(message);g_clear_error(&error);
   }
+}
+/* Retry while this GTK4 process remains open. No cloud credentials or daemon. */
+static gboolean retry_pending_tick(gpointer data) {
+  AppState *state=data;
+  GError *error=NULL;
+  guint count=ef_auto_backup_pending_count(&error);
+  if(error) {
+    if(state->folder_settings_status)
+      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),error->message);
+    g_clear_error(&error);return G_SOURCE_CONTINUE;
+  }
+  if(!count || !state->folder_settings.folder)return G_SOURCE_CONTINUE;
+  guint sent=0,remaining=0;
+  gboolean ok=ef_auto_backup_flush(&state->folder_settings,&sent,&remaining,&error);
+  if(state->settings_status && sent>0) {
+    char *msg=g_strdup_printf("%u cópia(s) criptografada(s) reenviada(s). Restam %u.",sent,remaining);
+    gtk_label_set_text(GTK_LABEL(state->settings_status),msg);
+    g_free(msg);
+  }
+  refresh_folder_settings(state);
+  if(!ok && error && state->folder_settings_status) {
+    char *msg=g_strdup_printf("%u cópia(s) pendente(s). Última tentativa: %s",
+                              remaining,error->message);
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_status),msg);
+    g_free(msg);
+  }
+  g_clear_error(&error);
+  return G_SOURCE_CONTINUE;
+}
+static void retry_pending_clicked(GtkButton *button,gpointer data) {
+  (void)button;
+  AppState *state=data;
+  guint pending=ef_auto_backup_pending_count(NULL);
+  retry_pending_tick(state);
+  if(pending==0 && state->folder_settings_status)
+    gtk_label_set_text(GTK_LABEL(state->folder_settings_status),"Nenhuma cópia pendente.");
 }
 static void folder_selected(GObject *source,GAsyncResult *result,gpointer data) {
   GtkWidget *window=GTK_WIDGET(data);
@@ -416,8 +461,10 @@ static void folder_selected(GObject *source,GAsyncResult *result,gpointer data) 
     char *path=g_file_get_path(folder);
     if(path && ef_folder_settings_save(&state->folder_settings,path,&error)) {
       refresh_folder_settings(state);
-      gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
-        "Pasta salva. A escolha será recuperada ao reiniciar o aplicativo.");
+      retry_pending_tick(state);
+      if(ef_auto_backup_pending_count(NULL)==0)
+        gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
+          "Pasta salva e fila de cópias recuperada. Configuração persistente.");
     } else {
       gtk_label_set_text(GTK_LABEL(state->folder_settings_status),
         error ? error->message : "Escolha uma pasta local montada e acessível.");
@@ -463,6 +510,7 @@ static void clear_folder_clicked(GtkButton *button,gpointer data) {
 static void validate_folder_clicked(GtkButton *button,gpointer data) {
   (void)button;
   refresh_folder_settings(data);
+  retry_pending_tick(data);
 }
 
 static void backup_clicked(GtkButton *button,gpointer data) {
@@ -535,6 +583,7 @@ static void navigate(GtkButton *button, gpointer data) {
 }
 static void destroy_state(gpointer data) {
   AppState *state=data;
+  if(state->pending_retry_source)g_source_remove(state->pending_retry_source);
   ef_store_close(&state->store);
   ef_folder_settings_clear(&state->folder_settings);
   g_free(state);
@@ -790,9 +839,11 @@ static void activate(GtkApplication *app,gpointer data) {
       GtkWidget *choose_folder=gtk_button_new_with_label("Selecionar pasta...");
       GtkWidget *validate_folder=gtk_button_new_with_label("Verificar pasta");
       GtkWidget *clear_folder=gtk_button_new_with_label("Remover seleção");
+      GtkWidget *retry_folder=gtk_button_new_with_label("Reenviar pendentes");
       gtk_box_append(GTK_BOX(folder_buttons),choose_folder);
       gtk_box_append(GTK_BOX(folder_buttons),validate_folder);
       gtk_box_append(GTK_BOX(folder_buttons),clear_folder);
+      gtk_box_append(GTK_BOX(folder_buttons),retry_folder);
       gtk_box_append(GTK_BOX(page),folder_buttons);
       state->folder_settings_status=gtk_label_new("");
       gtk_label_set_wrap(GTK_LABEL(state->folder_settings_status),TRUE);
@@ -801,6 +852,7 @@ static void activate(GtkApplication *app,gpointer data) {
       g_signal_connect(choose_folder,"clicked",G_CALLBACK(choose_folder_clicked),state);
       g_signal_connect(validate_folder,"clicked",G_CALLBACK(validate_folder_clicked),state);
       g_signal_connect(clear_folder,"clicked",G_CALLBACK(clear_folder_clicked),state);
+      g_signal_connect(retry_folder,"clicked",G_CALLBACK(retry_pending_clicked),state);
       state->backup_entry=gtk_entry_new();
       gtk_entry_set_placeholder_text(GTK_ENTRY(state->backup_entry),"Caminho completo do arquivo de backup .sqlite");
       gtk_box_append(GTK_BOX(page),state->backup_entry);
@@ -837,6 +889,8 @@ static void activate(GtkApplication *app,gpointer data) {
   }
   refresh_pickers(state);
   refresh_folder_settings(state);
+  retry_pending_tick(state);
+  state->pending_retry_source=g_timeout_add_seconds(20,retry_pending_tick,state);
   gtk_box_append(GTK_BOX(root),sidebar);
   gtk_box_append(GTK_BOX(root),gtk_separator_new(GTK_ORIENTATION_VERTICAL));
   gtk_widget_set_hexpand(stack,TRUE);
