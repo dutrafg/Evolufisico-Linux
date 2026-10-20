@@ -87,28 +87,85 @@ int main(void) {
   paths[7]=snapshot_after(&store,&settings,8);
   g_assert_no_error(error);
 
-  /* Offline mount: SQLCipher must still commit, and the copy failure is explicit. */
+  /* Offline folder: local commit succeeds, encrypted snapshot survives process restart. */
   char *disconnected=g_build_filename(root,"copies-disconnected",NULL);
   g_assert_cmpint(g_rename(folder,disconnected),==,0);
   g_assert_true(ef_store_add_client(&store,"Cliente Offline",&error));
-  g_assert_cmpint(ef_auto_backup_after_change(&store,&settings,&saved,&error),==,EF_AUTO_BACKUP_FAILED);
+  g_assert_cmpint(ef_auto_backup_after_change(&store,&settings,&saved,&error),==,EF_AUTO_BACKUP_QUEUED);
   g_assert_null(saved);
-  g_assert_nonnull(error);
-  g_clear_error(&error);
+  g_assert_nonnull(error);g_clear_error(&error);
+  g_assert_cmpuint(ef_auto_backup_pending_count(&error),==,1);
+  g_assert_no_error(error);
   GPtrArray *rows=ef_store_list_clients(&store,&error);
   g_assert_no_error(error);g_assert_cmpuint(rows->len,==,1);
   g_ptr_array_unref(rows);
+  ef_folder_settings_clear(&settings);
+  g_assert_true(ef_folder_settings_load(&settings,&error));g_assert_no_error(error);
+  g_assert_cmpstr(settings.folder,==,folder);
+  guint sent=123,remaining=123;
+  g_assert_false(ef_auto_backup_flush(&settings,&sent,&remaining,&error));
+  g_assert_nonnull(error);g_clear_error(&error);
+  g_assert_cmpuint(sent,==,0);g_assert_cmpuint(remaining,==,1);
+
+  char *queuedir=g_build_filename(local,"evolufisico","pending-snapshots",NULL);
+  GDir *pendingdir=g_dir_open(queuedir,0,&error);
+  g_assert_no_error(error);g_assert_nonnull(pendingdir);
+  char *queued_name=NULL;
+  const char *pending_name=NULL;
+  while((pending_name=g_dir_read_name(pendingdir))) {
+    if(g_str_has_prefix(pending_name,"evolufisico-") &&
+       g_str_has_suffix(pending_name,".sqlite")) {
+      queued_name=g_strdup(pending_name);break;
+    }
+  }
+  g_dir_close(pendingdir);g_assert_nonnull(queued_name);
+  char *queued_file=g_build_filename(queuedir,queued_name,NULL);
+  g_assert_true(ef_store_verify_snapshot(queued_file,&error));g_assert_no_error(error);
   g_assert_cmpint(g_rename(disconnected,folder),==,0);
-  paths[8]=snapshot_after(&store,&settings,9);
+
+  /* Never overwrite an existing foreign file; leave the encrypted snapshot queued. */
+  char *conflict=g_build_filename(folder,queued_name,NULL);
+  g_assert_true(g_file_set_contents(conflict,"do-not-overwrite",-1,&error));
+  g_assert_no_error(error);
+  g_assert_false(ef_auto_backup_flush(&settings,&sent,&remaining,&error));
+  g_assert_nonnull(error);g_clear_error(&error);
+  g_assert_cmpuint(remaining,==,1);
+  char *sentinel=NULL;
+  g_assert_true(g_file_get_contents(conflict,&sentinel,NULL,&error));
+  g_assert_no_error(error);g_assert_cmpstr(sentinel,==,"do-not-overwrite");
+  g_free(sentinel);
+  g_assert_cmpint(g_unlink(conflict),==,0);
+  g_assert_true(ef_auto_backup_flush(&settings,&sent,&remaining,&error));
+  g_assert_no_error(error);g_assert_cmpuint(sent,==,1);
+  g_assert_cmpuint(remaining,==,0);
+  g_assert_cmpuint(ef_auto_backup_pending_count(&error),==,0);
+  g_assert_no_error(error);
+  g_assert_cmpuint(snapshot_count(folder),==,9);
+  g_assert_true(ef_store_verify_snapshot(conflict,&error));g_assert_no_error(error);
+  g_free(queued_file);g_free(queued_name);g_free(conflict);
+  paths[8]=snapshot_after(&store,&settings,10);
   /* Restore a previous encrypted version and produce its own post-restore copy. */
   g_assert_true(ef_store_restore(&store,paths[4],&error));
   g_assert_no_error(error);
   rows=ef_store_list_clients(&store,&error);
   g_assert_no_error(error);g_assert_cmpuint(rows->len,==,1);
   g_ptr_array_unref(rows);
-  paths[9]=snapshot_after(&store,&settings,10);
+  paths[9]=snapshot_after(&store,&settings,11);
 
   for(guint i=0;i<10;i++){g_assert_nonnull(paths[i]);g_assert_cmpint(g_unlink(paths[i]),==,0);g_free(paths[i]);}
+  /* Delete the ninth snapshot, which was replayed from the offline queue. */
+  GDir *copies=g_dir_open(folder,0,&error);
+  g_assert_no_error(error);g_assert_nonnull(copies);
+  const char *item=NULL;
+  guint extras=0;
+  while((item=g_dir_read_name(copies))) {
+    if(g_str_has_prefix(item,"evolufisico-") && g_str_has_suffix(item,".sqlite")) {
+      char *extra=g_build_filename(folder,item,NULL);
+      g_assert_cmpint(g_unlink(extra),==,0);
+      g_free(extra);extras++;
+    }
+  }
+  g_dir_close(copies);g_assert_cmpuint(extras,==,1);
   ef_folder_settings_clear(&settings);
   ef_store_close(&store);
   char *database=g_build_filename(local,"evolufisico","records.sqlite",NULL);
@@ -117,6 +174,10 @@ int main(void) {
   char *configdir=g_path_get_dirname(configfile);
   g_assert_cmpint(g_unlink(database),==,0);
   g_assert_cmpint(g_unlink(configfile),==,0);
+  char *lockpath=g_build_filename(queuedir,".transfer.lock",NULL);
+  g_assert_cmpint(g_unlink(lockpath),==,0);
+  g_assert_cmpint(g_rmdir(queuedir),==,0);
+  g_free(lockpath);g_free(queuedir);
   g_assert_cmpint(g_rmdir(datadir),==,0);
   g_assert_cmpint(g_rmdir(configdir),==,0);
   g_assert_cmpint(g_rmdir(local),==,0);
