@@ -2,6 +2,7 @@
 #include "storage.h"
 #include "folder_settings.h"
 #include "auto_backup.h"
+#include "drive_sync.h"
 #include <errno.h>
 #include <math.h>
 
@@ -11,6 +12,8 @@ typedef struct {
   guint pending_retry_source;
   GtkWidget *folder_settings_label;
   GtkWidget *folder_settings_status;
+  GtkWidget *drive_remote_entry;
+  GtkWidget *drive_status;
   GtkWidget *client_list;
   GtkWidget *client_entry;
   GtkWidget *status;
@@ -513,6 +516,117 @@ static void validate_folder_clicked(GtkButton *button,gpointer data) {
   retry_pending_tick(data);
 }
 
+/* Google OAuth tokens are created and maintained only by rclone.
+ * The GTK application stores the remote name, never an access or refresh token.
+ * Network tasks run in worker threads to keep the UI responsive.
+ */
+typedef struct {
+  char *remote;
+  char *folder;
+  GtkWidget *status;
+  gboolean upload;
+} DriveTask;
+static void drive_task_free(gpointer data) {
+  DriveTask *op=data;
+  g_free(op->remote);g_free(op->folder);
+  g_object_unref(op->status);g_free(op);
+}
+static void drive_worker(GTask *task,gpointer source,gpointer task_data,GCancellable *cancel) {
+  (void)source;(void)cancel;
+  DriveTask *op=task_data;
+  GError *error=NULL;
+  guint count=0;
+  gboolean ok=op->upload
+    ? ef_drive_upload_encrypted(op->remote,op->folder,&count,&error)
+    : ef_drive_probe(op->remote,&error);
+  if(ok)g_task_return_int(task,(gint)count);
+  else if(error)g_task_return_error(task,error);
+  else g_task_return_new_error(task,g_quark_from_static_string("drive-ui"),1,"Operação de nuvem falhou.");
+}
+static void drive_finished(GObject *source,GAsyncResult *result,gpointer user_data) {
+  (void)source;(void)user_data;
+  GTask *task=G_TASK(result);
+  DriveTask *op=g_task_get_task_data(task);
+  GError *error=NULL;
+  gint count=g_task_propagate_int(task,&error);
+  char *message=NULL;
+  if(error) {
+    message=g_strdup_printf("Google Drive: operação não concluída. %s",error->message);
+    g_clear_error(&error);
+  }else if(op->upload) {
+    message=g_strdup_printf("Envio concluído pelo rclone: %d cópia(s) criptografada(s) processada(s); nenhuma exclusão local.",count);
+  }else{
+    message=g_strdup("Conta Google Drive acessível pelo rclone. Tokens continuam fora do EvoluFisico.");
+  }
+  g_object_set_data(G_OBJECT(op->status),"drive-operation-running",NULL);
+  gtk_label_set_text(GTK_LABEL(op->status),message);
+  g_free(message);
+}
+static void drive_configure_clicked(GtkButton *button,gpointer data) {
+  (void)button;
+  AppState *state=data;
+  GError *error=NULL;
+  if(ef_drive_open_oauth_setup(&error)) {
+    gtk_label_set_text(GTK_LABEL(state->drive_status),
+      "Terminal do rclone aberto. Crie uma conta 'drive' com OAuth (recomenda-se escopo drive.file e seu próprio Client ID). Depois informe o nome abaixo.");
+  }else{
+    gtk_label_set_text(GTK_LABEL(state->drive_status),
+      error ? error->message : "Não foi possível abrir configuração OAuth.");
+  }
+  g_clear_error(&error);
+}
+static void drive_save_clicked(GtkButton *button,gpointer data) {
+  (void)button;AppState *state=data;
+  const char *remote=gtk_editable_get_text(GTK_EDITABLE(state->drive_remote_entry));
+  GError *error=NULL;
+  if(ef_drive_save_remote(remote,&error)) {
+    gtk_label_set_text(GTK_LABEL(state->drive_status),
+      remote[0] ? "Nome da conta salvo. Use Testar conexão para confirmar a autorização OAuth."
+                : "Conta desassociada. O token do rclone não foi apagado.");
+  }else{
+    gtk_label_set_text(GTK_LABEL(state->drive_status),
+      error ? error->message : "Não foi possível salvar a conta.");
+  }
+  g_clear_error(&error);
+}
+static void drive_start_operation(AppState *state,gboolean upload) {
+  if(g_object_get_data(G_OBJECT(state->drive_status),"drive-operation-running"))return;
+  const char *remote=gtk_editable_get_text(GTK_EDITABLE(state->drive_remote_entry));
+  if(!ef_drive_valid_remote(remote)) {
+    gtk_label_set_text(GTK_LABEL(state->drive_status),"Informe o nome de uma conta rclone válida.");
+    return;
+  }
+  const char *folder=state->folder_settings.folder;
+  if(upload && (!folder || !*folder)) {
+    gtk_label_set_text(GTK_LABEL(state->drive_status),
+      "Configure primeiro a pasta local de cópias criptografadas.");
+    return;
+  }
+  GError *error=NULL;
+  if(!ef_drive_save_remote(remote,&error)) {
+    gtk_label_set_text(GTK_LABEL(state->drive_status),error ? error->message : "Erro ao salvar conta.");
+    g_clear_error(&error);return;
+  }
+  DriveTask *op=g_new0(DriveTask,1);
+  op->remote=g_strdup(remote);
+  op->folder=g_strdup(folder);
+  op->status=g_object_ref(state->drive_status);
+  op->upload=upload;
+  GTask *task=g_task_new(NULL,NULL,drive_finished,NULL);
+  g_task_set_task_data(task,op,drive_task_free);
+  g_object_set_data(G_OBJECT(state->drive_status),"drive-operation-running",GINT_TO_POINTER(1));
+  gtk_label_set_text(GTK_LABEL(state->drive_status),
+    upload ? "Verificando cópias SQLCipher e enviando ao Google Drive..." : "Verificando autorização do Google Drive...");
+  g_task_run_in_thread(task,drive_worker);
+  g_object_unref(task);
+}
+static void drive_test_clicked(GtkButton *button,gpointer data) {
+  (void)button;drive_start_operation(data,FALSE);
+}
+static void drive_upload_clicked(GtkButton *button,gpointer data) {
+  (void)button;drive_start_operation(data,TRUE);
+}
+
 static void backup_clicked(GtkButton *button,gpointer data) {
   (void)button;
   AppState *state=data;
@@ -826,6 +940,44 @@ static void activate(GtkApplication *app,gpointer data) {
       g_signal_connect(save_charge_button,"clicked",G_CALLBACK(save_charge),state);
       gtk_widget_set_sensitive(save_charge_button,state->store.db!=NULL);
     }else if(i==5){
+      GtkWidget *drive_title=gtk_label_new("Google Drive — autenticação OAuth pelo rclone");
+      gtk_widget_add_css_class(drive_title,"heading");
+      gtk_widget_set_halign(drive_title,GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(page),drive_title);
+      GtkWidget *drive_hint=gtk_label_new(
+        "Instale rclone e configure sua conta Google no navegador. O EvoluFisico não armazena tokens OAuth. Envio manual de backups SQLCipher; não é sincronização bidirecional.");
+      gtk_label_set_halign(GTK_LABEL(drive_hint),GTK_ALIGN_START);
+      gtk_label_set_wrap(GTK_LABEL(drive_hint),TRUE);
+      gtk_box_append(GTK_BOX(page),drive_hint);
+      state->drive_remote_entry=gtk_entry_new();
+      gtk_entry_set_placeholder_text(GTK_ENTRY(state->drive_remote_entry),"Nome da conta no rclone (ex.: meu_drive)");
+      GError *drive_load_error=NULL;
+      char *selected_drive=ef_drive_load_remote(&drive_load_error);
+      if(selected_drive)gtk_editable_set_text(GTK_EDITABLE(state->drive_remote_entry),selected_drive);
+      g_free(selected_drive);
+      if(drive_load_error) {
+        g_warning("Configuração Google Drive não carregada: %s",drive_load_error->message);
+        g_clear_error(&drive_load_error);
+      }
+      gtk_box_append(GTK_BOX(page),state->drive_remote_entry);
+      GtkWidget *drive_row=gtk_box_new(GTK_ORIENTATION_HORIZONTAL,8);
+      GtkWidget *drive_config=gtk_button_new_with_label("Configurar OAuth...");
+      GtkWidget *drive_save=gtk_button_new_with_label("Salvar conta");
+      GtkWidget *drive_test=gtk_button_new_with_label("Testar conexão");
+      GtkWidget *drive_upload=gtk_button_new_with_label("Enviar backups criptografados");
+      gtk_box_append(GTK_BOX(drive_row),drive_config);
+      gtk_box_append(GTK_BOX(drive_row),drive_save);
+      gtk_box_append(GTK_BOX(drive_row),drive_test);
+      gtk_box_append(GTK_BOX(drive_row),drive_upload);
+      gtk_box_append(GTK_BOX(page),drive_row);
+      state->drive_status=gtk_label_new("A conta Google precisa ser autorizada no rclone antes do primeiro envio.");
+      gtk_label_set_wrap(GTK_LABEL(state->drive_status),TRUE);
+      gtk_widget_set_halign(state->drive_status,GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(page),state->drive_status);
+      g_signal_connect(drive_config,"clicked",G_CALLBACK(drive_configure_clicked),state);
+      g_signal_connect(drive_save,"clicked",G_CALLBACK(drive_save_clicked),state);
+      g_signal_connect(drive_test,"clicked",G_CALLBACK(drive_test_clicked),state);
+      g_signal_connect(drive_upload,"clicked",G_CALLBACK(drive_upload_clicked),state);
       GtkWidget *folder_title=gtk_label_new("Pasta para cópias criptografadas");
       gtk_widget_add_css_class(folder_title,"heading");
       gtk_widget_set_halign(folder_title,GTK_ALIGN_START);
