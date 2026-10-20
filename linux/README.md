@@ -164,3 +164,17 @@ O aplicativo Linux está em estágio de **prévia técnica**. O pipeline automat
 - A pasta não recebe arquivos individuais legíveis de avaliação: são snapshots SQLCipher do banco inteiro, que exigem a senha original. Não compartilhar essa pasta com pessoas sem autorização.
 - **Limite importante:** esta etapa implementa cópia automática após salvar avaliações **enquanto o aplicativo estiver aberto**. Ainda **não** há monitoramento bidirecional da pasta, importação automática de alterações feitas externamente, agendamento em segundo plano ou sincronização entre dispositivos. Não anunciar sincronização completa.
 - QA cobre cópia válida, permissões do arquivo, pasta inexistente, caminho relativo e link simbólico. A proteção contra concorrência ainda requer homologação multiprocesso e teste de interrupção de energia.
+
+## Configuração persistente da pasta de cópias — primeira etapa Insync
+
+- Na tela **Configurações**, use **Selecionar pasta...** para escolher um diretório local ou uma pasta de nuvem **já montada** pelo sistema.
+- O caminho é validado e salvo em `$XDG_CONFIG_HOME/evolufisico/sync-folder.ini` (normalmente `~/.config/evolufisico/sync-folder.ini`), com permissões restritas. Não são armazenados tokens de provedores.
+- A escolha é restaurada no próximo início do aplicativo e aparece no campo de pasta da tela **Avaliações**. Esse campo é somente leitura para evitar configurações temporárias divergentes.
+- **Verificar pasta** testa disponibilidade e permissões. Se o drive for desconectado, o caminho configurado não é apagado, mas a verificação alerta que está indisponível. **Remover seleção** esquece o caminho sem excluir backups.
+- Ao salvar uma avaliação com pasta configurada e acessível, o fluxo existente cria um snapshot **SQLCipher** do banco, sem sobrescrever cópias anteriores, e informa separadamente eventual falha de cópia.
+- **Isso ainda não é uma sincronização contínua ou bidirecional** e não transfere arquivos diretamente ao Google Drive; a pasta de nuvem precisa estar montada por outro programa. Não há monitoramento em segundo plano nem tratamento de conflitos.
+- O teste automático `folder-settings` verifica persistência, reinício simulado, permissões, caminhos relativos/inexistentes, symlinks, versões incompatíveis e desconexão temporária.
+
+### Privacidade
+
+As configurações guardam apenas o caminho local. O banco e os snapshots são cifrados por SQLCipher, mas **metadados de nome e quantidade de backups ficam visíveis no sistema de arquivos**. Não use dados reais até a homologação Linux e revisão independente de segurança.
