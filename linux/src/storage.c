@@ -177,7 +177,7 @@ static gboolean encrypted_file_copy(const char *source,const char *destination,G
   g_object_unref(src);g_object_unref(dst);
   return ok;
 }
-static gboolean verify_encrypted_snapshot(const char *path,GError **error) {
+gboolean ef_store_verify_snapshot(const char *path,GError **error) {
   sqlite3 *db=NULL;
   if(sqlite3_open_v2(path,&db,SQLITE_OPEN_READONLY,NULL)!=SQLITE_OK) {
     if(db)sqlite3_close(db);
@@ -233,7 +233,7 @@ gboolean ef_store_backup(EfStore *store,const char *destination,GError **error) 
   char *temporary=g_strdup_printf("%s.tmp-%s",destination,g_uuid_string_random());
   gboolean ok=encrypted_file_copy(live,temporary,error);
   sqlite3_exec(store->db,"ROLLBACK",NULL,NULL,NULL);
-  if(ok)ok=verify_encrypted_snapshot(temporary,error);
+  if(ok)ok=ef_store_verify_snapshot(temporary,error);
   if(ok && g_chmod(temporary,0600)!=0) {
     g_set_error_literal(error,ef_error(),75,"Falha ao proteger backup");ok=FALSE;
   }
@@ -288,7 +288,7 @@ gboolean ef_store_restore(EfStore *store,const char *source,GError **error) {
     g_set_error_literal(error,ef_error(),78,"Backup inexistente ou igual ao banco ativo");
     g_free(live);return FALSE;
   }
-  if(!verify_encrypted_snapshot(source,error)){g_free(live);return FALSE;}
+  if(!ef_store_verify_snapshot(source,error)){g_free(live);return FALSE;}
   char *wal_file=g_strconcat(live,"-wal",NULL);
   gboolean has_wal=g_file_test(wal_file,G_FILE_TEST_EXISTS);
   g_free(wal_file);
