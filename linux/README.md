@@ -229,3 +229,16 @@ A conexão utiliza **rclone**, que abre o fluxo OAuth do Google no navegador e g
 - O rclone mantém seus próprios tokens OAuth em `rclone.conf` (a menos que seja configurado para armazenamento protegido); proteja esse arquivo com permissões privadas e preferencialmente senha no gerenciador de configuração.
 - O teste automatizado usa um **rclone simulado** e dados fictícios. Não prova que um login Google real, as cotas do Google Drive ou a conectividade do usuário funcionam; isto exige autorização e homologação em uma máquina Linux.
 - A versão continua **prévia técnica sem homologação para dados clínicos reais**.
+
+## Etapa 5 — Envio automático opt-in para o Google Drive
+
+- Em **Configurações → Google Drive**, selecione uma conta rclone autorizada, escolha a pasta local de snapshots SQLCipher e marque **Sincronização automática**. A opção é desativada por padrão e persistente.
+- Após mudanças no banco, o programa pode enviar novas cópias criptografadas de forma assíncrona. Também verifica pendências a cada **60 segundos**, apenas com o aplicativo aberto e desbloqueado.
+- O envio usa `rclone copyto --immutable`, sem excluir arquivos locais ou remotos e limitado a **oito arquivos por ciclo**.
+- Um registro de SHA-256 por conta evita reenvios desnecessários entre reinícios; uma falha mantém cópias sem confirmação. O contador considera toda a fila, inclusive se o primeiro envio falhar.
+- Falhas de rede ativam tentativas automáticas com intervalos progressivos de **1, 2, 4, 8 e até 16 minutos**.
+- Há verificações de integridade SQLCipher antes da transferência e bloqueios para symlinks e nomes perigosos.
+
+**Limitações:** esta etapa implementa somente backup incremental **Linux → Google Drive**. Não é sincronização bidirecional, não oferece download automático, exclusões espelhadas, resolução de conflitos, verificação de remoções remotas nem daemon independente do aplicativo. O registro local confirma apenas o resultado reportado pelo rclone.
+
+**QA:** o teste `cloud-sync` usa dados fictícios e rclone simulado, cobrindo ativação, filas, reconexão, deduplicação, lotes, múltiplas contas no registro e arquivos inválidos. Os testes ASan/UBSan executam no GitHub Actions. **Não usar dados clínicos reais antes de homologação e revisão independente de segurança.**
